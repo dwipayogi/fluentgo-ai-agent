@@ -1,0 +1,15 @@
+# Python artifacts
+venv/
+__pycache__/
+
+# Local environment & config files
+.env
+.env.local
+
+# Docker artifacts
+Dockerfile*
+.dockerignore
+
+# Git & Editor files
+.git
+.gitignore
