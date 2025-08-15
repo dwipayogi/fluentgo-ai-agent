@@ -1,89 +1,43 @@
-from livekit.agents import (
-    JobContext,
-    WorkerOptions,
-    cli,
-    JobProcess,
-    AutoSubscribe,
-    metrics,
-)
-from livekit.agents.llm import (
-    ChatContext,
-    ChatMessage,
-)
-from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import silero, groq
-from langdetect import detect
-
 from dotenv import load_dotenv
+
+from livekit import agents
+from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.plugins import (
+    noise_cancellation
+)
+from livekit.plugins import google
 
 load_dotenv()
 
-def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+class Assistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(instructions="Anda adalah penerjemah AI. Terjemahkan semua yang dikatakan pengguna dari Bahasa Indonesia ke Bahasa Inggris atau sebaliknya. Jangan tambahkan kata-kata lain selain terjemahan dari pernyataan pengguna.")
 
-
-async def entrypoint(ctx: JobContext):
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-    participant = await ctx.wait_for_participant()
-
-    print(f"connected to room : {ctx.room.name}\nwith participant : {participant.identity}")
-
-    initial_ctx = ChatContext(
-        messages=[
-            ChatMessage(
-                role="system",
-                content="You are a professional translator. The user will speak in Indonesian. Translate everything they say into fluent, natural English. Do not explain or add anything. Just translate only.",
-            )
-        ]
+async def entrypoint(ctx: agents.JobContext):
+    
+    agent = AgentSession(
+        llm=google.beta.realtime.RealtimeModel(
+            model="gemini-2.0-flash-exp",
+            voice="Puck",
+            temperature=0.8,
+            instructions="Anda adalah penerjemah AI. Terjemahkan semua yang dikatakan pengguna dari Bahasa Indonesia ke Bahasa Inggris atau sebaliknya. Jangan tambahkan kata-kata lain selain terjemahan dari pernyataan pengguna.",
+        ),
     )
 
-    # 🎯 Custom agent to handle translation
-    class TranslatorVoiceAgent(VoicePipelineAgent):
-        async def process_user_text(self, text: str) -> str:
-            print(f"[User Input]: {text}")
-
-            if len(text.strip().split()) < 2:
-                return ""
-
-            try:
-                detected_lang = detect(text)
-            except Exception as e:
-                print(f"[LangDetect Error]: {e}")
-                return ""  # skip on error
-
-            print(f"[Detected Language]: {detected_lang}")
-
-            if detected_lang == "en":
-                print("[Skip] Input already in English.")
-                return ""  # Don't respond if it's already English
-
-            # Otherwise, translate
-            translation = await self.llm_respond(text)
-            print(f"[Translation 🇬🇧]: {translation}")
-
-            return translation
-
-    agent = TranslatorVoiceAgent(
-        vad=ctx.proc.userdata["vad"],
-        stt=groq.STT(),
-        llm=groq.LLM(),
-        tts=groq.TTS(voice="Cheyenne-PlayAI"),
-        chat_ctx=initial_ctx,
+    await agent.start(
+        room=ctx.room,
+        agent=Assistant(),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC(),
+            text_enabled=True,
+            audio_enabled=True,
+            video_enabled=True,
+        ),
     )
 
-    @agent.on("metrics_collected")
-    def _on_metrics_collected(mtrcs: metrics.AgentMetrics):
-        metrics.log_metrics(mtrcs)
-
-    agent.start(ctx.room)
-    await agent.say("Hello, I am your translator. Please speak in Indonesian and I will translate your words into fluent English.", allow_interruptions=True)
-
+    await agent.generate_reply(
+        instructions="Sapa pengguna dan kenalkan diri anda dan tawarkan bantuan."
+    )
 
 if __name__ == "__main__":
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm,
-            agent_name="indo-to-english-translator",
-        )
-    )
+    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
